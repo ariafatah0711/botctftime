@@ -48,6 +48,7 @@ CTFTIME_POLL_MINUTES = max(5, _env_int("CTFTIME_POLL_MINUTES") or 60)
 CTFTIME_LOOKAHEAD_DAYS = max(1, _env_int("CTFTIME_LOOKAHEAD_DAYS") or 7)
 CTFTIME_MAX_EVENTS_PER_POLL = max(1, _env_int("CTFTIME_MAX_EVENTS_PER_POLL") or 3)
 CTFTIME_SEND_EXISTING_ON_START = _env_flag("CTFTIME_SEND_EXISTING_ON_START", False)
+CTFTIME_NOTIFY_EVERYONE = _env_flag("CTFTIME_NOTIFY_EVERYONE", False)
 
 
 def _format_discord_timestamp(dt: datetime) -> str:
@@ -99,6 +100,7 @@ class Commands(commands.Cog):
         self.bot = bot
         self.announced_event_ids = set()
         self.notifier_bootstrapped = False
+        self.notifier_permission_warning_sent = False
 
         if CTFTIME_NOTIFIER_ENABLED and CTFTIME_NOTIFY_CHANNEL_ID:
             self.ctftime_notifier.change_interval(minutes=CTFTIME_POLL_MINUTES)
@@ -137,7 +139,19 @@ class Commands(commands.Cog):
             embed.set_thumbnail(url=event["logo"])
 
         embed.set_footer(text="CTFtime Upcoming Notifier")
-        await channel.send(content="@everyone", embed=embed, allowed_mentions=discord.AllowedMentions(everyone=True))
+
+        # Try configured mention behavior first, then fallback without mention.
+        try:
+            if CTFTIME_NOTIFY_EVERYONE:
+                await channel.send(
+                    content="@everyone",
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(everyone=True),
+                )
+            else:
+                await channel.send(embed=embed)
+        except discord.Forbidden:
+            await channel.send(embed=embed)
 
     @tasks.loop(minutes=60)
     async def ctftime_notifier(self):
@@ -161,7 +175,18 @@ class Commands(commands.Cog):
                     event_id = event.get("id")
                     if event_id is None:
                         continue
-                    await self._send_event_embed(channel, event)
+                    try:
+                        await self._send_event_embed(channel, event)
+                    except discord.Forbidden:
+                        if not self.notifier_permission_warning_sent:
+                            print(
+                                "CTFtime notifier cannot send message to target channel "
+                                "(missing Send Messages/Embed Links permission)."
+                            )
+                            self.notifier_permission_warning_sent = True
+                        return
+                    except Exception:
+                        continue
             return
 
         new_events = [event for event in events if event.get("id") not in self.announced_event_ids]
@@ -171,8 +196,19 @@ class Commands(commands.Cog):
             event_id = event.get("id")
             if event_id is None:
                 continue
-            await self._send_event_embed(channel, event)
-            self.announced_event_ids.add(event_id)
+            try:
+                await self._send_event_embed(channel, event)
+                self.announced_event_ids.add(event_id)
+            except discord.Forbidden:
+                if not self.notifier_permission_warning_sent:
+                    print(
+                        "CTFtime notifier cannot send message to target channel "
+                        "(missing Send Messages/Embed Links permission)."
+                    )
+                    self.notifier_permission_warning_sent = True
+                return
+            except Exception:
+                continue
 
         # Keep only IDs that are still relevant to prevent unbounded growth.
         self.announced_event_ids.intersection_update(current_ids)
