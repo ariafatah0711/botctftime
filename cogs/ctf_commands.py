@@ -77,8 +77,28 @@ class CTFCog(commands.Cog):
         current_ids = {event.get("id") for event in events if event.get("id") is not None}
 
         if not self.notifier_bootstrapped:
-            self.announced_event_ids.update(current_ids)
             self.notifier_bootstrapped = True
+            initial_events = events[: SETTINGS.ctftime_max_events_per_poll]
+            for event in initial_events:
+                event_id = event.get("id")
+                if event_id is None:
+                    continue
+                try:
+                    await self._send_event_embed(channel, event)
+                    self.announced_event_ids.add(event_id)
+                except discord.Forbidden:
+                    if not self.notifier_permission_warning_sent:
+                        print(
+                            "CTFtime notifier cannot send message to target channel "
+                            "(missing Send Messages/Embed Links permission)."
+                        )
+                        self.notifier_permission_warning_sent = True
+                    return
+                except Exception:
+                    continue
+
+            # Mark remaining current events as announced to avoid duplicate reposts.
+            self.announced_event_ids.update(current_ids)
             return
 
         new_events = [event for event in events if event.get("id") not in self.announced_event_ids]
@@ -204,9 +224,9 @@ class CTFCog(commands.Cog):
             mention_mode = "none"
 
         if mention_mode == "everyone":
-            embed.add_field(name="📣 Mention", value="@everyone", inline=True)
+            embed.add_field(name="📣 Mention", value="Everyone", inline=True)
         elif mention_mode == "role" and role:
-            embed.add_field(name="📣 Mention", value=role.mention, inline=True)
+            embed.add_field(name="📣 Mention", value=f"Role: {role.name}", inline=True)
         else:
             embed.add_field(name="📣 Mention", value="No mention", inline=True)
 
