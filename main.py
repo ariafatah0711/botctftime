@@ -48,17 +48,20 @@ async def on_ready() -> None:
         print("Logged in, but bot user is not available yet.")
     print("Bot is ready.")
 
+    # Always sync global commands first so deleted/renamed commands are applied.
+    synced_global = await bot.tree.sync()
+    logger.info("Global slash commands synced: %s", len(synced_global))
+
+    # For faster rollout while testing, mirror global commands to configured guilds.
     guild_ids = _env_int_list("DISCORD_SYNC_GUILD_IDS")
     if guild_ids:
         synced_total = 0
         for guild_id in guild_ids:
             guild = discord.Object(id=guild_id)
+            bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
             synced_total += len(synced)
-        logger.info("Slash commands synced to %s guild(s), total commands: %s", len(guild_ids), synced_total)
-    else:
-        synced = await bot.tree.sync()
-        logger.info("Global slash commands synced: %s", len(synced))
+        logger.info("Guild slash commands synced to %s guild(s), total commands: %s", len(guild_ids), synced_total)
 
 
 async def _load_extensions() -> None:
