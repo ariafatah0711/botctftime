@@ -24,6 +24,7 @@ class Settings:
     findteam_mention_mode: str
 
     ctftime_notify_channel_id: Optional[int]
+    ctftime_notify_role_id: Optional[int]
     ctftime_poll_minutes: int
     ctftime_lookahead_days: int
     ctftime_max_events_per_poll: int
@@ -41,12 +42,17 @@ DEFAULT_FINDTEAM_MENTION_MODE = "everyone"  # everyone | role | none
 
 DEFAULT_CTFTIME_POLL_MINUTES = 60
 DEFAULT_CTFTIME_LOOKAHEAD_DAYS = 7
-DEFAULT_CTFTIME_MAX_EVENTS_PER_POLL = 3
+DEFAULT_CTFTIME_MAX_EVENTS_PER_POLL = 10
 
 # =================================================================
 # Load settings from environment variables, with defaults as fallback.
 # =================================================================
 def load_settings() -> Settings:
+    max_events = env_int("CTFTIME_MAX_EVENTS_PER_POLL")
+    if max_events is None:
+        max_events = DEFAULT_CTFTIME_MAX_EVENTS_PER_POLL
+    max_events = max(1, min(10, max_events))
+
     return Settings(
         team_name=DEFAULT_TEAM_NAME,
         team_url=DEFAULT_TEAM_URL,
@@ -56,9 +62,10 @@ def load_settings() -> Settings:
         ctf_role_id=env_int("CTF_ROLE_ID"),
         findteam_mention_mode=os.getenv("FINDTEAM_MENTION_MODE", DEFAULT_FINDTEAM_MENTION_MODE).strip().lower(),
         ctftime_notify_channel_id=env_int("CTFTIME_NOTIFY_CHANNEL_ID"),
+        ctftime_notify_role_id=env_int("CTFTIME_NOTIFY_ROLE_ID"),
         ctftime_poll_minutes=DEFAULT_CTFTIME_POLL_MINUTES,
         ctftime_lookahead_days=DEFAULT_CTFTIME_LOOKAHEAD_DAYS,
-        ctftime_max_events_per_poll=DEFAULT_CTFTIME_MAX_EVENTS_PER_POLL,
+        ctftime_max_events_per_poll=max_events,
     )
 
 SETTINGS = load_settings()

@@ -30,9 +30,24 @@ class CTFCog(commands.Cog):
         hours = duration.get("hours", 0)
         return f"{days} hari, {hours} jam"
 
+    def _detect_participation_mode(self, event: Dict) -> str:
+        restrictions = str(event.get("restrictions", "")).strip()
+        restrictions_lower = restrictions.lower()
+        if restrictions and restrictions_lower not in {"open", "unknown"}:
+            return restrictions
+
+        description = str(event.get("description", "")).lower()
+        if "individual competition" in description or "individual" in description:
+            return "Individual"
+        if "team" in description:
+            return "Team"
+
+        return "Open"
+
     def _build_event_embed(self, event: Dict) -> discord.Embed:
         start_dt = parse_iso_datetime(event["start"])
         finish_dt = parse_iso_datetime(event["finish"])
+        participation_mode = self._detect_participation_mode(event)
 
         embed = discord.Embed(
             title=f"🚩 {event.get('title', 'Unknown Event')}",
@@ -40,7 +55,8 @@ class CTFCog(commands.Cog):
                 f"**Mulai:** {format_discord_timestamp(start_dt)}\n"
                 f"**Selesai:** {format_discord_timestamp(finish_dt)}\n"
                 f"**Durasi:** {self._format_duration(event)}\n"
-                f"**Format:** {event.get('format', 'Unknown')}"
+                f"**Format:** {event.get('format', 'Unknown')}\n"
+                f"**Mode:** {participation_mode}"
             ),
             url=event.get("ctftime_url") or event.get("url") or SETTINGS.team_url,
             color=0xFFA500,
@@ -59,8 +75,14 @@ class CTFCog(commands.Cog):
 
     async def _send_event_embed(self, channel: discord.TextChannel, event: Dict):
         embed = self._build_event_embed(event)
+        role_id = SETTINGS.ctftime_notify_role_id
+        mention_text = f"<@&{role_id}> 📢 Event upcoming CTFtime" if role_id else "📢 Event upcoming CTFtime"
 
-        await channel.send(content="📢 Event baru terdeteksi di CTFtime", embed=embed)
+        await channel.send(
+            content=mention_text,
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(roles=True),
+        )
 
     @tasks.loop(minutes=60)
     async def ctftime_notifier(self):
@@ -81,14 +103,14 @@ class CTFCog(commands.Cog):
 
         if not self.notifier_bootstrapped:
             self.notifier_bootstrapped = True
+
             initial_events = events[: SETTINGS.ctftime_max_events_per_poll]
-            for event in initial_events:
-                event_id = event.get("id")
-                if event_id is None:
-                    continue
+            initial_ids = [event.get("id") for event in initial_events if event.get("id") is not None]
+            if initial_events:
                 try:
-                    await self._send_event_embed(channel, event)
-                    self.announced_event_ids.add(event_id)
+                    for event in initial_events:
+                        await self._send_event_embed(channel, event)
+                    self.announced_event_ids.update(initial_ids)
                 except discord.Forbidden:
                     if not self.notifier_permission_warning_sent:
                         print(
@@ -98,9 +120,9 @@ class CTFCog(commands.Cog):
                         self.notifier_permission_warning_sent = True
                     return
                 except Exception:
-                    continue
+                    pass
 
-            # Mark remaining current events as announced to avoid duplicate reposts.
+            # Mark all current events as announced to avoid duplicate reposts.
             self.announced_event_ids.update(current_ids)
             return
 
@@ -108,13 +130,12 @@ class CTFCog(commands.Cog):
         new_events = [event for event in events if event.get("id") not in self.announced_event_ids]
         new_events = new_events[: SETTINGS.ctftime_max_events_per_poll]
 
-        for event in new_events:
-            event_id = event.get("id")
-            if event_id is None:
-                continue
+        new_ids = [event.get("id") for event in new_events if event.get("id") is not None]
+        if new_events:
             try:
-                await self._send_event_embed(channel, event)
-                self.announced_event_ids.add(event_id)
+                for event in new_events:
+                    await self._send_event_embed(channel, event)
+                self.announced_event_ids.update(new_ids)
             except discord.Forbidden:
                 if not self.notifier_permission_warning_sent:
                     print(
@@ -124,7 +145,7 @@ class CTFCog(commands.Cog):
                     self.notifier_permission_warning_sent = True
                 return
             except Exception:
-                continue
+                pass
 
         self.announced_event_ids.intersection_update(current_ids)
 
