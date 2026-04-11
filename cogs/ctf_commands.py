@@ -24,40 +24,43 @@ class CTFCog(commands.Cog):
         if self.ctftime_notifier.is_running():
             self.ctftime_notifier.cancel()
 
-    async def _send_event_embed(self, channel: discord.TextChannel, event: Dict):
-        start_dt = parse_iso_datetime(event["start"])
-        finish_dt = parse_iso_datetime(event["finish"])
+    def _format_duration(self, event: Dict) -> str:
         duration = event.get("duration", {})
         days = duration.get("days", 0)
         hours = duration.get("hours", 0)
+        return f"{days} hari, {hours} jam"
+
+    def _build_event_embed(self, event: Dict) -> discord.Embed:
+        start_dt = parse_iso_datetime(event["start"])
+        finish_dt = parse_iso_datetime(event["finish"])
 
         embed = discord.Embed(
-            title=f"📢 Upcoming CTF: {event.get('title', 'Unknown Event')}",
-            description=event.get("description", "No description")[:1200],
+            title=f"🚩 {event.get('title', 'Unknown Event')}",
+            description=(
+                f"**Mulai:** {format_discord_timestamp(start_dt)}\n"
+                f"**Selesai:** {format_discord_timestamp(finish_dt)}\n"
+                f"**Durasi:** {self._format_duration(event)}\n"
+                f"**Format:** {event.get('format', 'Unknown')}"
+            ),
             url=event.get("ctftime_url") or event.get("url") or SETTINGS.team_url,
             color=0xFFA500,
             timestamp=discord.utils.utcnow(),
         )
 
-        embed.add_field(name="🕒 Start", value=format_discord_timestamp(start_dt), inline=False)
-        embed.add_field(name="🏁 Finish", value=format_discord_timestamp(finish_dt), inline=False)
-        embed.add_field(name="⏱ Duration", value=f"{days} day(s), {hours} hour(s)", inline=True)
-        embed.add_field(name="🎮 Format", value=event.get("format", "Unknown"), inline=True)
-        embed.add_field(name="🔓 Restrictions", value=event.get("restrictions", "Unknown"), inline=True)
-
-        event_url = event.get("url") or "Not provided"
-        embed.add_field(name="🌐 Event URL", value=event_url, inline=False)
-        embed.add_field(name="🏆 CTFtime", value=event.get("ctftime_url", "Not provided"), inline=False)
+        event_url = event.get("url")
+        if event_url:
+            embed.add_field(name="🌐 Website", value=event_url, inline=False)
 
         if event.get("logo"):
             embed.set_thumbnail(url=event["logo"])
 
-        embed.set_footer(text="CTFtime Upcoming Notifier")
+        embed.set_footer(text="CTFtime Notifier")
+        return embed
 
-        try:
-            await channel.send(embed=embed)
-        except discord.Forbidden:
-            await channel.send(embed=embed)
+    async def _send_event_embed(self, channel: discord.TextChannel, event: Dict):
+        embed = self._build_event_embed(event)
+
+        await channel.send(content="📢 Event baru terdeteksi di CTFtime", embed=embed)
 
     @tasks.loop(minutes=60)
     async def ctftime_notifier(self):
@@ -101,6 +104,7 @@ class CTFCog(commands.Cog):
             self.announced_event_ids.update(current_ids)
             return
 
+        # Cuma ambil event baru yang belum pernah dipost, urutan sudah paling dekat dulu.
         new_events = [event for event in events if event.get("id") not in self.announced_event_ids]
         new_events = new_events[: SETTINGS.ctftime_max_events_per_poll]
 
@@ -129,7 +133,7 @@ class CTFCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     # =================================================================
-    #
+    # Other CTF-related commands can be added here, such as team info, find team, etc.
     # =================================================================
     @commands.hybrid_command(name="ping", description="Cek latency bot")
     async def ping(self, ctx):
