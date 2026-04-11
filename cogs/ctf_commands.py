@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Set
 
 import discord
 from discord.ext import commands, tasks
@@ -14,7 +14,6 @@ class RecruitmentSession:
     guild_id: int
     channel_id: int
     message_id: int
-    role_id: int
     thread_id: Optional[int]
     nama_ctf: str
     team: str
@@ -23,6 +22,7 @@ class RecruitmentSession:
     note: str
     author_id: int
     expires_at: datetime
+    claimed_user_ids: Set[int] = field(default_factory=set)
 
 
 class ClaimRoleView(discord.ui.View):
@@ -31,7 +31,7 @@ class ClaimRoleView(discord.ui.View):
         self.cog = cog
         self.message_id = message_id
 
-    @discord.ui.button(label="Claim / Unclaim Role", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Join / Leave Event", style=discord.ButtonStyle.primary)
     async def toggle_claim(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.cog.handle_claim_toggle(interaction, self.message_id)
 
@@ -118,24 +118,37 @@ class CTFCog(commands.Cog):
         self,
         session: RecruitmentSession,
         guild: discord.Guild,
-        claim_count: int,
         is_closed: bool,
     ) -> discord.Embed:
         status_text = "Closed" if is_closed else "Open"
         status_emoji = "🔒" if is_closed else "🟢"
-        role_mention = f"<@&{session.role_id}>"
         thread_text = f"<#{session.thread_id}>" if session.thread_id else "Belum dibuat"
+
+        joined_mentions = []
+        for user_id in sorted(session.claimed_user_ids):
+            member = guild.get_member(user_id)
+            if member is not None:
+                joined_mentions.append(member.mention)
+
+        claim_count = len(joined_mentions)
+        if joined_mentions:
+            preview = joined_mentions[:20]
+            joined_text = ", ".join(preview)
+            if len(joined_mentions) > len(preview):
+                joined_text += f" +{len(joined_mentions) - len(preview)} lagi"
+        else:
+            joined_text = "Belum ada"
 
         embed = discord.Embed(
             title=f"🎯 Team Up CTF: {session.nama_ctf}",
-            description="Cari squad untuk main CTF bareng. Klik tombol untuk claim role event.",
+            description="Cari squad untuk main CTF bareng. Klik tombol untuk join/leave event.",
             color=0x2ECC71 if not is_closed else 0x7F8C8D,
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(name="👥 Team", value=session.team, inline=True)
         embed.add_field(name="📌 Status", value=f"{status_emoji} {status_text}", inline=True)
         embed.add_field(name="🙋 Claimed", value=f"{claim_count} orang", inline=True)
-        embed.add_field(name="🎭 Role Event", value=role_mention, inline=False)
+        embed.add_field(name="✅ Joined", value=joined_text, inline=False)
         embed.add_field(name="🧵 Thread Event", value=thread_text, inline=False)
         embed.add_field(name="🕒 Ditutup", value=self._format_discord_time(session.expires_at), inline=False)
 
@@ -163,9 +176,7 @@ class CTFCog(commands.Cog):
         if not isinstance(channel, discord.TextChannel):
             return
 
-        role = guild.get_role(session.role_id)
-        claim_count = len(role.members) if role else 0
-        embed = self._build_findteam_embed(session, guild, claim_count=claim_count, is_closed=is_closed)
+        embed = self._build_findteam_embed(session, guild, is_closed=is_closed)
 
         try:
             message = await channel.fetch_message(session.message_id)
@@ -182,23 +193,6 @@ class CTFCog(commands.Cog):
         if guild is None:
             self.recruitment_sessions.pop(session.message_id, None)
             return
-
-        role = guild.get_role(session.role_id)
-        if role is not None:
-            members = list(role.members)
-            for member in members:
-                try:
-                    await member.remove_roles(role, reason="Recruitment closed")
-                except discord.Forbidden:
-                    pass
-                except discord.HTTPException:
-                    pass
-            try:
-                await role.delete(reason="Recruitment closed")
-            except discord.Forbidden:
-                pass
-            except discord.HTTPException:
-                pass
 
         if session.thread_id is not None:
             thread = guild.get_thread(session.thread_id)
@@ -241,30 +235,17 @@ class CTFCog(commands.Cog):
             await interaction.response.send_message("Recruitment sudah ditutup.", ephemeral=True)
             return
 
-        role = interaction.guild.get_role(session.role_id)
-        if role is None:
-            await interaction.response.send_message("Role recruitment tidak ditemukan.", ephemeral=True)
-            return
-
         member = interaction.guild.get_member(interaction.user.id)
         if member is None:
             await interaction.response.send_message("Member tidak ditemukan di guild.", ephemeral=True)
             return
 
-        claimed = role in member.roles
-        try:
-            if claimed:
-                await member.remove_roles(role, reason="Unclaim CTF recruitment role")
-                text = f"Kamu unclaim role {role.mention}."
-            else:
-                await member.add_roles(role, reason="Claim CTF recruitment role")
-                text = f"Kamu claim role {role.mention}."
-        except discord.Forbidden:
-            await interaction.response.send_message("Bot tidak punya izin untuk mengubah role.", ephemeral=True)
-            return
-        except discord.HTTPException:
-            await interaction.response.send_message("Gagal update role, coba lagi.", ephemeral=True)
-            return
+        if member.id in session.claimed_user_ids:
+            session.claimed_user_ids.remove(member.id)
+            text = "Kamu leave dari event ini."
+        else:
+            session.claimed_user_ids.add(member.id)
+            text = "Kamu join ke event ini."
 
         await interaction.response.send_message(text, ephemeral=True)
 
@@ -433,20 +414,6 @@ class CTFCog(commands.Cog):
         durasi_jam = max(1, min(168, durasi_jam))
         expires_at = self._utc_now() + timedelta(hours=durasi_jam)
 
-        role_name = f"ctf-{nama_ctf}"[:100]
-        try:
-            event_role = await ctx.guild.create_role(
-                name=role_name,
-                mentionable=True,
-                reason=f"Recruitment role for {nama_ctf}",
-            )
-        except discord.Forbidden:
-            await ctx.reply("❌ Bot tidak punya izin buat bikin role.")
-            return
-        except discord.HTTPException:
-            await ctx.reply("❌ Gagal bikin role recruitment.")
-            return
-
         role = ctx.guild.get_role(SETTINGS.ctf_role_id) if SETTINGS.ctf_role_id else None
         mention_mode = SETTINGS.findteam_mention_mode
         mention_text = ""
@@ -461,7 +428,6 @@ class CTFCog(commands.Cog):
             guild_id=ctx.guild.id,
             channel_id=ctx.channel.id,
             message_id=0,
-            role_id=event_role.id,
             thread_id=None,
             nama_ctf=nama_ctf,
             team=team,
@@ -472,7 +438,7 @@ class CTFCog(commands.Cog):
             expires_at=expires_at,
         )
 
-        embed = self._build_findteam_embed(temp_session, ctx.guild, claim_count=0, is_closed=False)
+        embed = self._build_findteam_embed(temp_session, ctx.guild, is_closed=False)
 
         try:
             message = await ctx.send(
@@ -483,24 +449,15 @@ class CTFCog(commands.Cog):
             )
         except discord.Forbidden:
             await ctx.reply("❌ Bot tidak punya izin kirim pesan atau attach view.")
-            try:
-                await event_role.delete(reason="Rollback: no permission to send recruitment message")
-            except Exception:
-                pass
             return
         except discord.HTTPException:
             await ctx.reply("❌ Gagal kirim pesan recruitment.")
-            try:
-                await event_role.delete(reason="Rollback: failed to send recruitment message")
-            except Exception:
-                pass
             return
 
         session = RecruitmentSession(
             guild_id=ctx.guild.id,
             channel_id=ctx.channel.id,
             message_id=message.id,
-            role_id=event_role.id,
             thread_id=None,
             nama_ctf=nama_ctf,
             team=team,
@@ -523,7 +480,7 @@ class CTFCog(commands.Cog):
             session.thread_id = thread.id
             await thread.send(
                 f"Thread khusus event {nama_ctf}.\n"
-                f"Claim role dulu: <@&{event_role.id}>\n"
+                "Klik tombol Join / Leave Event di pesan utama buat daftar.\n"
                 f"Event URL: {website}"
             )
         except discord.Forbidden:

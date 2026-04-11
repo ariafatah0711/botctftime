@@ -59,8 +59,17 @@ async def on_ready() -> None:
         for guild_id in guild_ids:
             guild = discord.Object(id=guild_id)
             bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            synced_total += len(synced)
+            try:
+                synced = await bot.tree.sync(guild=guild)
+                synced_total += len(synced)
+            except discord.Forbidden:
+                logger.warning(
+                    "Skip guild command sync for guild %s: Missing Access. "
+                    "Check DISCORD_SYNC_GUILD_IDS and ensure bot is in that guild.",
+                    guild_id,
+                )
+            except discord.HTTPException as exc:
+                logger.warning("Skip guild command sync for guild %s: %s", guild_id, exc)
         logger.info("Guild slash commands synced to %s guild(s), total commands: %s", len(guild_ids), synced_total)
 
 
