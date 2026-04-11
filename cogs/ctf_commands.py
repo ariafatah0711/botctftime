@@ -21,7 +21,7 @@ class RecruitmentSession:
     website: str
     note: str
     author_id: int
-    expires_at: datetime
+    expires_at: Optional[datetime]
     claimed_user_ids: Set[int] = field(default_factory=set)
 
 
@@ -120,46 +120,55 @@ class CTFCog(commands.Cog):
         guild: discord.Guild,
         is_closed: bool,
     ) -> discord.Embed:
-        status_text = "Closed" if is_closed else "Open"
-        status_emoji = "🔒" if is_closed else "🟢"
         thread_text = f"<#{session.thread_id}>" if session.thread_id else "Belum dibuat"
 
-        joined_mentions = []
-        for user_id in sorted(session.claimed_user_ids):
-            member = guild.get_member(user_id)
-            if member is not None:
-                joined_mentions.append(member.mention)
+        joined_mentions = [f"<@{user_id}>" for user_id in sorted(session.claimed_user_ids)]
 
-        claim_count = len(joined_mentions)
+        claim_count = len(session.claimed_user_ids)
         if joined_mentions:
-            preview = joined_mentions[:20]
-            joined_text = ", ".join(preview)
+            preview = joined_mentions[:25]
+            joined_text = "\n".join(f"{idx}. {mention}" for idx, mention in enumerate(preview, start=1))
             if len(joined_mentions) > len(preview):
-                joined_text += f" +{len(joined_mentions) - len(preview)} lagi"
+                joined_text += f"\n... +{len(joined_mentions) - len(preview)} lagi"
         else:
             joined_text = "Belum ada"
 
+        invite_is_url = session.invite.startswith("http://") or session.invite.startswith("https://")
+        event_url = session.website.strip()
+        event_is_url = event_url.startswith("http://") or event_url.startswith("https://")
+
+        if invite_is_url:
+            invite_text = f"[Join Event]({session.invite})"
+        else:
+            invite_text = f"Kode: **{session.invite}**"
+
+        if event_is_url:
+            event_text = f"[Buka Website Event]({event_url})"
+        else:
+            event_text = event_url or "Tidak tersedia"
+
         embed = discord.Embed(
             title=f"🎯 Team Up CTF: {session.nama_ctf}",
-            description="Cari squad untuk main CTF bareng. Klik tombol untuk join/leave event.",
+            description="Klik tombol **Join / Leave Event** untuk daftar cepat.",
             color=0x2ECC71 if not is_closed else 0x7F8C8D,
             timestamp=discord.utils.utcnow(),
         )
         embed.add_field(name="👥 Team", value=session.team, inline=True)
-        embed.add_field(name="📌 Status", value=f"{status_emoji} {status_text}", inline=True)
         embed.add_field(name="🙋 Claimed", value=f"{claim_count} orang", inline=True)
-        embed.add_field(name="✅ Joined", value=joined_text, inline=False)
-        embed.add_field(name="🧵 Thread Event", value=thread_text, inline=False)
-        embed.add_field(name="🕒 Ditutup", value=self._format_discord_time(session.expires_at), inline=False)
 
-        if session.invite.startswith("http"):
-            embed.add_field(name="🔗 Join", value=session.invite, inline=False)
+        embed.add_field(name="🧵 Thread", value=thread_text, inline=True)
+        if session.expires_at is None:
+            embed.add_field(name="🕒 Ditutup", value="Permanent", inline=True)
         else:
-            embed.add_field(name="🔑 Invite Code", value=session.invite, inline=False)
+            embed.add_field(name="🕒 Ditutup", value=self._format_discord_time(session.expires_at), inline=True)
 
-        embed.add_field(name="🌐 Event URL", value=session.website, inline=False)
-        embed.add_field(name="🏆 Team CTFtime", value=f"[Lihat Profil Tim]({SETTINGS.team_url})", inline=False)
-        embed.add_field(name="📝 Catatan", value=session.note, inline=False)
+        embed.add_field(name="🔐 Invite", value=invite_text, inline=False)
+        embed.add_field(name="🌐 Event URL", value=event_text, inline=False)
+        embed.add_field(name="✅ Joined Members", value=joined_text, inline=False)
+
+        note_clean = session.note.strip()
+        if note_clean and note_clean.lower() not in {"no note", "none", "-"}:
+            embed.add_field(name="📝 Catatan", value=note_clean, inline=False)
 
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
@@ -230,14 +239,28 @@ class CTFCog(commands.Cog):
             await interaction.response.send_message("Recruitment ini sudah tidak aktif.", ephemeral=True)
             return
 
-        if self._utc_now() >= session.expires_at:
+        if session.expires_at is not None and self._utc_now() >= session.expires_at:
             await self._close_recruitment_session(session)
             await interaction.response.send_message("Recruitment sudah ditutup.", ephemeral=True)
             return
 
-        member = interaction.guild.get_member(interaction.user.id)
+        member: Optional[discord.Member]
+        if isinstance(interaction.user, discord.Member):
+            member = interaction.user
+        else:
+            member = interaction.guild.get_member(interaction.user.id)
+
         if member is None:
-            await interaction.response.send_message("Member tidak ditemukan di guild.", ephemeral=True)
+            try:
+                member = await interaction.guild.fetch_member(interaction.user.id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                member = None
+
+        if member is None:
+            await interaction.response.send_message(
+                "Gagal mengambil data member dari guild. Coba lagi sebentar.",
+                ephemeral=True,
+            )
             return
 
         if member.id in session.claimed_user_ids:
@@ -337,7 +360,11 @@ class CTFCog(commands.Cog):
     @tasks.loop(minutes=1)
     async def recruitment_cleanup(self):
         now = self._utc_now()
-        expired_sessions = [session for session in self.recruitment_sessions.values() if now >= session.expires_at]
+        expired_sessions = [
+            session
+            for session in self.recruitment_sessions.values()
+            if session.expires_at is not None and now >= session.expires_at
+        ]
         for session in expired_sessions:
             await self._close_recruitment_session(session)
 
@@ -402,7 +429,7 @@ class CTFCog(commands.Cog):
         invite: str,
         website: str,
         note: str = "No note",
-        durasi_jam: int = 24,
+        durasi_jam: int = 0,
     ):
         if ctx.guild is None:
             await ctx.reply("❌ Command ini hanya bisa dipakai di dalam server.")
@@ -411,8 +438,11 @@ class CTFCog(commands.Cog):
             await ctx.reply("❌ Pakai command ini di channel text biasa, bukan thread/DM.")
             return
 
-        durasi_jam = max(1, min(168, durasi_jam))
-        expires_at = self._utc_now() + timedelta(hours=durasi_jam)
+        if durasi_jam <= 0:
+            expires_at = None
+        else:
+            durasi_jam = min(168, durasi_jam)
+            expires_at = self._utc_now() + timedelta(hours=durasi_jam)
 
         role = ctx.guild.get_role(SETTINGS.ctf_role_id) if SETTINGS.ctf_role_id else None
         mention_mode = SETTINGS.findteam_mention_mode
