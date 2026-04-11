@@ -143,7 +143,7 @@ class CTFCog(commands.Cog):
             invite_text = f"Kode: **{session.invite}**"
 
         if event_is_url:
-            event_text = f"[Buka Website Event]({event_url})"
+            event_text = f"{event_url}"
         else:
             event_text = event_url or "Tidak tersedia"
 
